@@ -10,94 +10,124 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+     runs-on: ubuntu-24.04
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
+steps:
+  - name: Checkout repository
+    uses: actions/checkout@v6
+    with:
+      fetch-depth: 0
 
-      - name: Setup JDK 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-          cache: maven
+  - name: Setup JDK 17
+    uses: actions/setup-java@v4
+    with:
+      java-version: '17'
+      distribution: temurin
+      cache: maven
 
-      - name: Get next build number
-        id: pre_build
-        run: |
-          LAST_NUM=$(git ls-remote --tags origin | grep -o 'refs/tags/v[0-9]*$' | sed 's/.*v//' | sort -n | tail -n1)
+  - name: Get next build number
+    id: pre_build
+    shell: bash
+    run: |
+      set -euo pipefail
 
-          if [ -z "$LAST_NUM" ]; then
-            NEXT_NUM=1
-          else
-            NEXT_NUM=$((LAST_NUM + 1))
-          fi
+      git fetch --tags origin
 
-          echo "next_number=$NEXT_NUM" >> "$GITHUB_OUTPUT"
+      LAST_NUM=$(
+        git tag -l 'v[0-9]*' |
+        grep -E '^v[0-9]+$' |
+        sed 's/^v//' |
+        sort -n |
+        tail -n 1 || true
+      )
 
-      - name: Build with Maven
-        run: |
-          mvn -B clean package \
-            --file pom.xml \
-            -DskipTests \
-            -Dbuild.number=${{ steps.pre_build.outputs.next_number }}
+      if [ -z "$LAST_NUM" ]; then
+        NEXT_NUM=1
+      else
+        NEXT_NUM=$((LAST_NUM + 1))
+      fi
 
-      - name: Rename JAR and package with workspace
-        id: package
-        run: |
-          NEXT_NUM=${{ steps.pre_build.outputs.next_number }}
+      echo "next_number=$NEXT_NUM" >> "$GITHUB_OUTPUT"
+      echo "Next build number: $NEXT_NUM"
 
-          ORIGINAL_JAR="target/react-fuscator"
+  - name: Build with Maven
+    shell: bash
+    run: |
+      set -euo pipefail
 
-          if [ ! -f "$ORIGINAL_JAR" ]; then
-            echo "❌ ERROR: Shaded JAR not found at $ORIGINAL_JAR"
-            ls -la target/
-            exit 1
-          fi
+      mvn -B clean package \
+        --file pom.xml \
+        -DskipTests \
+        -Dbuild.number=${{ steps.pre_build.outputs.next_number }}
 
-          JAR_NAME="react-fuscator-${NEXT_NUM}.jar"
-          cp "$ORIGINAL_JAR" "$JAR_NAME"
+  - name: Package JAR
+    id: package
+    shell: bash
+    run: |
+      set -euo pipefail
 
-          echo "JAR_FILE=$JAR_NAME" >> "$GITHUB_ENV"
-          echo "next_number=$NEXT_NUM" >> "$GITHUB_OUTPUT"
+      NEXT_NUM=${{ steps.pre_build.outputs.next_number }}
+      ORIGINAL_JAR="target/react-fuscator.jar"
 
-      - name: Generate changelog
-        run: |
-          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-          REPO_URL="${{ github.server_url }}/${{ github.repository }}"
+      if [ ! -f "$ORIGINAL_JAR" ]; then
+        echo "ERROR: Shaded JAR not found at $ORIGINAL_JAR"
+        ls -lah target/
+        exit 1
+      fi
 
-          echo "## Changes" > CHANGELOG.md
+      JAR_NAME="react-fuscator-${NEXT_NUM}.jar"
+      cp "$ORIGINAL_JAR" "$JAR_NAME"
 
-          if [ -z "$LAST_TAG" ]; then
-            echo "_Initial release_" >> CHANGELOG.md
-            echo "" >> CHANGELOG.md
+      echo "JAR_FILE=$JAR_NAME" >> "$GITHUB_OUTPUT"
+      echo "next_number=$NEXT_NUM" >> "$GITHUB_OUTPUT"
 
-            git log --pretty=format:"- %s ([%h](${REPO_URL}/commit/%H))" >> CHANGELOG.md
-          else
-            echo "_Changes since $LAST_TAG_" >> CHANGELOG.md
-            echo "" >> CHANGELOG.md
+      echo "Successfully packaged $JAR_NAME"
+      ls -lh "$JAR_NAME"
 
-            git log "$LAST_TAG..HEAD" \
-              --pretty=format:"- %s ([%h](${REPO_URL}/commit/%H))" >> CHANGELOG.md
-          fi
+  - name: Generate changelog
+    shell: bash
+    run: |
+      set -euo pipefail
 
-          echo "" >> CHANGELOG.md
+      LAST_TAG=$(
+        git tag -l 'v[0-9]*' |
+        grep -E '^v[0-9]+$' |
+        sort -V |
+        tail -n 1 || true
+      )
 
-          echo "Generated CHANGELOG.md:"
-          cat CHANGELOG.md
+      REPO_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
 
-      - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v3.0.3
-        with:
-          files: |
-            ${{ env.ZIP_FILE }}
-            ${{ env.JAR_FILE }}
-          tag_name: v${{ steps.package.outputs.next_number }}
-          name: React-fuscator Build ${{ steps.package.outputs.next_number }}
-          body_path: CHANGELOG.md
-          overwrite_files: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      {
+        echo "## Changes"
+        echo
+
+        if [ -z "$LAST_TAG" ]; then
+          echo "_Initial release_"
+          echo
+          git log -n 100 \
+            --pretty=format:"- %s ([%h](${REPO_URL}/commit/%H))" HEAD
+        else
+          echo "_Changes since ${LAST_TAG}_"
+          echo
+          git log -n 100 \
+            --pretty=format:"- %s ([%h](${REPO_URL}/commit/%H))" \
+            "${LAST_TAG}..HEAD"
+        fi
+
+        echo
+      } > CHANGELOG.md
+
+      cat CHANGELOG.md
+
+  - name: Publish GitHub Release
+    uses: softprops/action-gh-release@v3.0.3
+    with:
+      files: ${{ steps.package.outputs.JAR_FILE }}
+      tag_name: v${{ steps.package.outputs.next_number }}
+      name: React-Fuscator Build ${{ steps.package.outputs.next_number }}
+      body_path: CHANGELOG.md
+      fail_on_unmatched_files: true
+      overwrite_files: true
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
